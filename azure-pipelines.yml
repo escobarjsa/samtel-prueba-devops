@@ -1,0 +1,145 @@
+trigger:
+- master
+
+pool:
+  name: 'jescobar-pool'  # Grupo de agentes de Azure Pipelines.
+  # vmImage: ubuntu-latest
+
+stages:
+
+# Etapada de integración continua
+- stage: CI
+  jobs:
+  - job: Build
+
+    steps:
+      # Instala una versión específica de Node.js en el agente de compilación.
+      - task: NodeTool@0
+        displayName: 'Install Node Version: $(NODE_VERSION)'
+        inputs:
+          versionSource: 'spec'
+          versionSpec: '$(NODE_VERSION)'
+
+# Prepara el análisis del código con SonarQube, una herramienta para revisar y mejorar la calidad del código.
+      - task: SonarQubePrepare@5
+        displayName: 'Prepare Analysis on SonarQube'
+        inputs:
+          SonarQube: 'sonarqube-escobarpc'
+          scannerMode: 'CLI'
+          configMode: 'manual'
+          cliProjectKey: 'AzureSonarDemoSamtel'
+          cliProjectName: 'AzureSonarDemoSamtel'
+          cliSources: 'src/'
+          extraProperties: |
+            sonar.exclusions=**/node_modules/**
+            sonar.test.inclusions=**/*.spec.ts
+            sonar.tests=src/app
+            # sonar.testExecutionReportPaths=.\coverage\lcov.info
+            # sonar.javascript.lcov.reportPaths=.\coverage\lcov.info
+            # sonar.javascript.lcov.reportPaths=$(System.DefaultWorkingDirectory)\coverage\lcov.info
+            sonar.javascript.lcov.reportPaths=C:\agent\agent-jescobar\_work\1\s\coverage\lcov.info
+            # sonar.qualitygate.wait=true
+            # sonar.qualitygate.timeout=900
+
+      # Ejecuta el comando de compilación de Angular.
+      - task: CmdLine@2
+        displayName: 'Install Dependencies'
+        inputs:
+          script: 'npm install'
+          workingDirectory: $(System.DefaultWorkingDirectory)
+      
+      # Ejecuta el comando de compilación de Angular.
+      - task: CmdLine@2
+        displayName: 'Build Angular App'
+        inputs:
+          script: 'npm run build'
+          workingDirectory: $(System.DefaultWorkingDirectory)
+
+      # Ejecuta pruebas unitarias utilizando Karma, una herramienta de prueba para aplicaciones Angular.
+      - task: CmdLine@2
+        displayName: 'Executing Unit Test And Coverage'
+        inputs:
+          script: |
+            $(BUILD_UNIT_TEST_COMMAND)
+          workingDirectory: $(System.DefaultWorkingDirectory)
+        continueOnError: true
+
+      # Modifica las variables de entorno para el análisis en SonarQube.
+      - task: PowerShell@2
+        displayName: 'Activate Analysis On SonarQube'
+        inputs:
+          targetType: 'inline'
+          script: |
+            $params = "$env:SONARQUBE_SCANNER_PARAMS" -replace '"sonar.branch.name":"[\w,/,-]*"\,?'
+                Write-Host "##vso[task.setvariable variable=SONARQUBE_SCANNER_PARAMS]$params"
+
+      # Ejecuta el análisis del código con SonarQube, una herramienta para revisar y mejorar la calidad del código.
+      - task: SonarQubeAnalyze@5
+        displayName: 'Run Static Code Analysis'
+        # continueOnError: true
+
+      # Publica los resultados del análisis del código en SonarQube.
+      - task: SonarQubePublish@5
+        displayName: 'Publish Quality Gate Result'
+        # continueOnError: true
+        inputs:
+          pollingTimeoutSec: '400'
+        
+      #Publica los artefactos de compilación, como los archivos de distribución de la aplicación.
+      - task: PublishBuildArtifacts@1
+        displayName: 'Publish Artifacts'
+        inputs:
+          PathtoPublish: '$(Build.SourcesDirectory)/dist'
+          ArtifactName: '$(artifactsName)'
+          publishLocation: 'Container'
+
+# Etapada de despliegue continuo
+- stage: 'CD'
+  displayName: Deploy
+  jobs:
+  - job: 'deployment'
+    displayName: 'Deploy' 
+    steps:
+
+    # Tarea para construir una imagen Docker y subir a DockerHub
+    - task: Docker@2
+      displayName: 'Docker Build And Push to Docker Hub'
+      inputs:
+        containerRegistry: 'docker-hub-escobarjsa'
+        repository: 'escobarjsa/samtel-prueba'
+        command: 'buildAndPush'
+        Dockerfile: '**/Dockerfile'
+        tags: 'latest'
+
+    # Tarea para logearse en Kubernetes.
+    - task: Kubernetes@1
+      displayName: 'K8s Login'
+      inputs:
+        connectionType: 'Kubernetes Service Connection'
+        kubernetesServiceEndpoint: 'kubernetes-escobarpc-local'
+        namespace: '$(namespace)'
+        command: 'login'
+    
+    #Tarea para reiniciar un despliegue en Kubernetes.
+    - task: CmdLine@2
+      displayName: 'K8s Restart'
+      inputs:  
+        script: 'kubectl --insecure-skip-tls-verify rollout restart deployment/angular-app -n=$(namespace)'  # Comando para reiniciar un despliegue en Kubernetes usando 'kubectl', especificando el despliegue y el namespace.
+
+    # Script que crea 10 archivos con la fecha y luego lo imprima en consola
+    - powershell: |
+        for ($i = 1; $i -le 10; $i++) {
+          $date = Get-Date
+          $date > "file_$i.txt"
+        }
+        Get-ChildItem -Path . -Filter "file_*.txt"
+      displayName: 'Create and List Files'
+
+    # Imprime Hola Mundo 10 veces en pantalla con un job paralelo
+  - job: ParallelJobs
+    strategy:
+      parallel: 10
+    steps:
+    - script: echo "Hola Mundo"
+      displayName: 'Print Hola Mundo'
+  
